@@ -1,0 +1,57 @@
+{
+    "__default__" :
+    {
+        "account" : "lsens2017-3-2",
+        "time" : "01:15:00",
+        "N" : 1,
+        "n" : 5,
+        "partition" : "dell",
+        "o" : "%j.out",
+        "e" : "%j.err",
+        "J" : "%j"
+    },
+    "run_bt2_sensloc" :
+    {
+        "account" : "lsens2017-3-2",
+        "time" : "00:30:00",
+        "N" : 1,
+        "n" : 10,
+        "partition" : "dell",
+        "o" : "%j.bt2.out",
+        "e" : "%j.bt2.err",
+        "J" : "%j.bt2"
+    },
+    "sam_filtering" :
+    {
+        "account" : "lsens2017-3-2",
+        "time" : "02:30:00",
+        "N" : 1,
+        "n" : 10,
+        "partition" : "dell",
+        "o" : "%j.samfilter.out",
+        "e" : "%j.samfilter.err",
+        "J" : "%j.samfilter"
+    },
+    "samToBam" :
+    {
+        "account" : "lsens2017-3-2",
+        "time" : "02:30:00",
+        "N" : 1,
+        "n" : 10,
+        "partition" : "dell",
+        "o" : "%j.samToBam.out",
+        "e" : "%j.samToBam.err",
+        "J" : "%j.samToBam"
+    },
+    "BamToBw" :
+    {
+        "account" : "lsens2017-3-2",
+        "time" : "02:30:00",
+        "N" : 1,
+        "n" : 10,
+        "partition" : "dell",
+        "o" : "%j.BamToBw.out",
+        "e" : "%j.BamToBw.err",
+        "J" : "%j.BamToBw"
+    }
+}

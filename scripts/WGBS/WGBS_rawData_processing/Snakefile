@@ -1,0 +1,370 @@
+configfile: "config.yaml"
+
+# snakemake -j 8 --cluster-config lunarc_config.json --cluster "sbatch -A {cluster.account} --mem-per-cpu {cluster.memory} -p {cluster.partition} -n {cluster.n} -t {cluster.time} -o {cluster.o} -e {cluster.e} -J {cluster.J} -N {cluster.N}"  --latency-wait 100
+
+rule all:
+    input:
+        #expand("../1_fastq.raw/fastqc/{sample}.R1_fastqc.html",sample=config["samples"]),
+        #expand("../1_fastq.raw/fastqc/{sample}.R2_fastqc.html",sample=config["samples"]),
+        #expand("../2_fastq.trimmed/fastqc/{sample}.R1.trimmomatic_fastqc.html",sample=config["samples"]),
+        #expand("{bsdir}{bschrs}",bsdir=config["genomeDir"]["bsCon"],bschrs=config["bsgenome"]),
+        #expand("../2_fastq.trimmed/{sample}.R2.trimmomatic.cut20.fq.gz",sample=config["samples"]),
+        #expand("../3_bismark/{sample}_bismark_bt2_pe.bam",sample=config["samples"]),
+        "../5_reports/bismark_summary_report.html",
+        #expand("../5_reports/deduplicated/{sample}_bismark_bt2_pe.deduplicated.bam.html",sample=config["samples"]),
+        expand("../3_bismark/{sample}_bismark_bt2_pe.M-bias.txt",sample=config["samples"]),
+        #expand("../3_bismark/{sample}_bismark_bt2_pe.bismark.bw",sample=config["samples"]),
+        expand("../4_deduplicated/CX/{sample}_bismark_bt2_pe.deduplicated.bismark.bw",sample=config["samples"]),
+        #expand("../4_deduplicated/CpG/{sample}_bismark_bt2_pe.deduplicated.bismark.bw",sample=config["samples"]),
+        expand("../4_deduplicated/CpG/5x/{sample}_bismark_bt2_pe.deduplicated.bismark.5x.bw",sample=config["samples"]),
+
+# FASTQC - quality control
+rule fastqc_raw:
+    input:
+        "../1_fastq.raw/{sample}.R1.fq.gz",
+        "../1_fastq.raw/{sample}.R2.fq.gz"
+    output:
+        "../1_fastq.raw/fastqc/{sample}.R1_fastqc.html",
+        "../1_fastq.raw/fastqc/{sample}.R2_fastqc.html"
+    threads: 8
+    shell:
+        """
+        ml fastqc
+        fastqc {input}
+
+        mkdir ../1_fastq.raw/fastqc
+        mv ../1_fastq.raw/*fastqc.* ../1_fastq.raw/fastqc/
+        """
+
+## Filter/Trim reads        
+rule trimmomatic_r1_r2:
+    input:
+        "../1_fastq.raw/{sample}.R1.fq.gz",
+        "../1_fastq.raw/{sample}.R2.fq.gz"
+    output:
+        "../2_fastq.trimmed/{sample}.R1.trimmomatic.fq.gz",
+        "../2_fastq.trimmed/{sample}.R1.trimmomatic.unpaired.fq.gz",
+        "../2_fastq.trimmed/{sample}.R2.trimmomatic.fq.gz",
+        "../2_fastq.trimmed/{sample}.R2.trimmomatic.unpaired.fq.gz",
+    threads: 8
+    params:
+        leading=20,
+        trailing=20,
+        slidingw_wind=4,
+        slidingw_q=20,
+        minlen=50
+    shell:
+        """
+        module load Trimmomatic/0.32-Java-1.8.0_92
+
+        java -jar $EBROOTTRIMMOMATIC/trimmomatic-0.32.jar PE -threads 8 -phred33 -trimlog ../2_fastq.trimmed/{wildcards.sample}.trim.log {input} {output} ILLUMINACLIP:TruSeq3-PE.fa:2:30:10 LEADING:{params.leading} TRAILING:{params.trailing} SLIDINGWINDOW:{params.slidingw_wind}:{params.slidingw_q} MINLEN:{params.minlen}
+
+        """
+## Cut first 20 bases from read 2
+rule cutadapt_r2:
+    input:
+        "../2_fastq.trimmed/{sample}.R2.trimmomatic.fq.gz"
+    output:
+        "../2_fastq.trimmed/{sample}.R2.trimmomatic.cut20.fq.gz"
+    threads: 8
+    shell:
+        """
+        ml GCC/4.9.3-2.25  OpenMPI/1.10.2
+        ml cutadapt/1.9.1-Python-2.7.11
+        cutadapt -u 20 -o {output} {input}
+        """
+
+## Fastqc of trimmed/filtered reads
+rule fastqc_trimmed:
+    input:
+        "../2_fastq.trimmed/{sample}.R1.trimmomatic.fq.gz",
+        "../2_fastq.trimmed/{sample}.R2.trimmomatic.cut20.fq.gz",
+    output:
+        "../2_fastq.trimmed/fastqc/{sample}.R1.trimmomatic_fastqc.html",
+        "../2_fastq.trimmed/fastqc/{sample}.R2.trimmomatic.cut20_fastqc.html"
+    threads: 8
+    shell:
+        """
+        ml fastqc
+        fastqc {input}
+        mkdir ../2_fastq.trimmed/fastqc
+        mv ../2_fastq.trimmed/*fastqc.* "../2_fastq.trimmed/fastqc/"
+        """
+
+## Prepare BS genome
+rule bismark_prepareGenome:
+    input:
+        expand("{dir}",dir=config["genomeDir"]["hg38"])
+    output:
+        expand("{bsdir}CT_conversion/{bschrs}",bsdir=config["genomeDir"]["bismark"],bschrs=config["bismark_genome"])
+    shell:
+        """
+        ml  GCC/5.4.0-2.26  OpenMPI/1.10.3
+        ml Bismark/0.19.0
+        ml Bowtie2/2.3.2
+        ### PATH TO GENOME
+        bismark_genome_preparation --bowtie2 --verbose {input}
+
+        """
+
+## Run Bismark
+rule run_bismark:
+    input:
+        r1="../2_fastq.trimmed/{sample}.R1.trimmomatic.fq.gz",
+        r2="../2_fastq.trimmed/{sample}.R2.trimmomatic.cut20.fq.gz",
+        bsgenomepath=config["genomeDir"]["hg38"],
+        bsgenome=expand("{bsdir}CT_conversion/{bschrs}",bsdir=config["genomeDir"]["bismark"],bschrs=config["bismark_genome"])
+    output:
+        bam="../3_bismark/{sample}_bismark_bt2_pe.bam",
+        rep="../3_bismark/{sample}_bismark_bt2_PE_report.txt",
+
+    threads: 8
+    shell:
+        """
+        ml  GCC/5.4.0-2.26  OpenMPI/1.10.3
+        ml Bismark/0.19.0
+        ml Bowtie2/2.3.2
+
+        bismark --multicore 8 -o ../3_bismark -q --phred33-quals {input.bsgenomepath} -1 {input.r1} -2 {input.r2}
+
+        # Change filename, remove 'R1.'
+        mv ../3_bismark/{wildcards.sample}.R1.trimmomatic_bismark_bt2_pe.bam  {output.bam}
+        mv ../3_bismark/{wildcards.sample}.R1.trimmomatic_bismark_bt2_PE_report.txt {output.rep}
+        """
+
+## Deduplicate data
+rule run_deduplication:
+    input:
+        bam="../3_bismark/{sample}_bismark_bt2_pe.bam",
+    output:
+        bam="../4_deduplicated/{sample}_bismark_bt2_pe.deduplicated.bam",
+    params:
+        dir="../4_deduplicated"
+    shell:
+        """
+        ml  GCC/5.4.0-2.26  OpenMPI/1.10.3
+        ml Bismark/0.19.0
+        ml Bowtie2/2.3.2
+
+        deduplicate_bismark -p --output_dir {params.dir} --bam {input.bam}
+        """
+
+## Extract methylation data (all C contexts --CX)
+rule run_methylationExtraction:
+    input:
+        bam="../4_deduplicated/{sample}_bismark_bt2_pe.deduplicated.bam",
+    output:
+        "../4_deduplicated/CX/{sample}_bismark_bt2_pe.deduplicated.M-bias.txt",
+        "../4_deduplicated/CX/{sample}_bismark_bt2_pe.deduplicated_splitting_report.txt",
+        "../4_deduplicated/CX/{sample}_bismark_bt2_pe.deduplicated.bedGraph.gz",
+        "../4_deduplicated/CX/{sample}_bismark_bt2_pe.deduplicated.bismark.cov.gz",
+    threads: 8
+    params:
+        gDir=config["genomeDir"]["hg38"],
+        outdir="../4_deduplicated/CX"
+    shell:
+        """
+        ml  GCC/5.4.0-2.26  OpenMPI/1.10.3
+        ml Bismark/0.19.0
+
+        cd ../4_deduplicated/
+        bismark_methylation_extractor --multicore 8 -p --no_overlap -o {params.outdir}   --bedGraph --cytosine_report --CX --genome_folder {params.gDir}  {input}
+
+        cd ../src
+        """
+
+## Extract methylation into (only at CpGs)
+rule run_methylationExtraction_CpG:
+    input:
+        bam="../4_deduplicated/{sample}_bismark_bt2_pe.deduplicated.bam",
+    output:
+        "../4_deduplicated/CpG/{sample}_bismark_bt2_pe.deduplicated.M-bias.txt",
+        "../4_deduplicated/CpG/{sample}_bismark_bt2_pe.deduplicated_splitting_report.txt",
+        "../4_deduplicated/CpG/{sample}_bismark_bt2_pe.deduplicated.bedGraph.gz",
+        cov="../4_deduplicated/CpG/{sample}_bismark_bt2_pe.deduplicated.bismark.cov.gz",
+
+
+    threads: 8
+    params:
+        gDir=config["genomeDir"]["hg38"],
+        outdir="../4_deduplicated/CpG"
+    shell:
+        """
+        ml  GCC/5.4.0-2.26  OpenMPI/1.10.3
+        ml Bismark/0.19.0
+
+        cd ../4_deduplicated
+        bismark_methylation_extractor --multicore 8 -p  --no_overlap -o {params.outdir}   --bedGraph --genome_folder {params.gDir}  {input}
+
+        cd ../src
+        """
+        
+## Make Report
+rule run_bismark2report:
+    input:
+        mbias="../4_deduplicated/CX/{sample}_bismark_bt2_pe.deduplicated.M-bias.txt",
+        splitting="../4_deduplicated/CX/{sample}_bismark_bt2_pe.deduplicated_splitting_report.txt",
+        align="../4_deduplicated/CX/{sample}_bismark_bt2_pe.deduplicated.bam",
+
+
+    output:
+        "../5_reports/deduplicated/{sample}_bismark_bt2_pe.deduplicated.bam.html"
+    params:
+        dir="../5_reports/deduplicated",
+    shell:
+        """
+        ml  GCC/5.4.0-2.26  OpenMPI/1.10.3
+        ml Bismark/0.19.0
+
+        bismark2report --alignment_report {input.align} --splitting_report {input.splitting} --mbias_report {input.mbias} --dir {params.dir}
+        """
+
+## Make summary (of all C contexts)
+rule run_bismark2summary_CX:
+    input:
+        expand("../3_bismark/{sample}_bismark_bt2_pe.bam",sample=config["samples"])
+    output:
+        "../5_reports/bismark_summary_report.html"
+    shell:
+        """
+        ml  GCC/5.4.0-2.26  OpenMPI/1.10.3
+        ml Bismark/0.19.0
+        ml  ucsc-tools/3.4.3
+
+        cd ../3_bismark
+        bismark2summary
+        cp *summary_report.* ../5_reports/
+        """
+
+## Gunzip BedGraph files (CX files)
+rule run_gunzipBedGraph:
+    input:
+        "../4_deduplicated/CX/{sample}_bismark_bt2_pe.deduplicated.bedGraph.gz"
+    output:
+        "../4_deduplicated/CX/{sample}_bismark_bt2_pe.deduplicated.bedGraph"
+    shell:
+        """
+         gunzip {input}
+        """
+
+## Gunzip BedGraph (Only CpG)
+rule run_gunzipBedGraph_CpG:
+    input:
+        "../4_deduplicated/CpG/{sample}_bismark_bt2_pe.deduplicated.bedGraph.gz"
+    output:
+        "../4_deduplicated/CpG/{sample}_bismark_bt2_pe.deduplicated.bedGraph"
+    shell:
+        """
+         gunzip {input}
+        """
+
+## Convert bedGraph to BigWig (CX)
+rule run_bedGraph2bigWig:
+    input:
+        "../4_deduplicated/CX/{sample}_bismark_bt2_pe.deduplicated.bedGraph"
+    output:
+        "../4_deduplicated/CX/{sample}_bismark_bt2_pe.deduplicated.bismark.bw"
+    params:
+        sorted="../4_deduplicated/CX/{sample}_bismark_bt2_pe.deduplicated.sorted.bedGraph",
+    shell:
+        """
+        ml GCC/5.4.0-2.26  OpenMPI/1.10.3
+        ml  ucsc-tools/3.4.3
+
+
+        # check if bedGraph has the header , remove if it does
+        content=$(head -1 {input})
+
+        if [[ $content != chr* ]]; then
+          echo 'remove bedGraph header.. '
+          grep chr {input} > ../4_deduplicated/CX/tmp.{wildcards.sample}.txt
+          mv ../4_deduplicated/CX/tmp.{wildcards.sample}.txt {input}
+        fi
+
+        if [ ! -f {params.sorted} ]
+        then
+            echo 'Sort bedGraph'
+            sort -k1,1 -k2,2n {input} >  {params.sorted}
+
+        fi
+
+        bedGraphToBigWig {params.sorted} /projects/fs1/common/genome/lunarc/genomes/human/hg38/hg38_chrom_sizes.txt {output}
+
+        """
+## Convert bedGraph to BigWig (CpG only)
+rule run_bedGraph2bigWig_CpG:
+    input:
+        "../4_deduplicated/CpG/{sample}_bismark_bt2_pe.deduplicated.bedGraph"
+    output:
+        "../4_deduplicated/CpG/{sample}_bismark_bt2_pe.deduplicated.bismark.bw"
+    params:
+        sorted="../4_deduplicated/CpG/{sample}_bismark_bt2_pe.deduplicated.sorted.bedGraph",
+    shell:
+        """
+        ml GCC/5.4.0-2.26  OpenMPI/1.10.3
+        ml  ucsc-tools/3.4.3
+
+
+        # check if bedGraph has the header , remove if it does
+        content=$(head -1 {input})
+
+        if [[ $content != chr* ]]; then
+          echo 'remove bedGraph header.. '
+          grep chr {input} > ../4_deduplicated/CpG/tmp.{wildcards.sample}.txt
+          mv ../4_deduplicated/CpG/tmp.{wildcards.sample}.txt {input}
+        fi
+
+        if [ ! -f {params.sorted} ]
+        then
+            echo 'Sort bedGraph'
+            sort -k1,1 -k2,2n {input} >  {params.sorted}
+
+        fi
+
+        bedGraphToBigWig {params.sorted} /projects/fs1/common/genome/lunarc/genomes/human/hg38/hg38_chrom_sizes.txt {output}
+
+        """
+
+## Gunzip Coverage file
+rule gunzip_cov:
+    input:
+        "../4_deduplicated/CpG/{sample}_bismark_bt2_pe.deduplicated.bismark.cov.gz"
+    output:
+        "../4_deduplicated/CpG/{sample}_bismark_bt2_pe.deduplicated.bismark.cov"
+    shell:
+     """
+         gunzip {input}
+     """
+rule make_5x:
+    input:
+        "../4_deduplicated/CpG/{sample}_bismark_bt2_pe.deduplicated.bismark.cov",
+    output:
+        "../4_deduplicated/CpG/5x/{sample}_bismark_bt2_pe.deduplicated.bismark.5x.cov",
+    shell:
+        """
+            awk ' {{ if ( $6+$5 > 4 ) {{ print $0 }} }} ' {input} > {output}
+        """
+
+## Convert 5x coverage file to BigWig
+rule cov5x_toBw:
+    input:
+        "../4_deduplicated/CpG/5x/{sample}_bismark_bt2_pe.deduplicated.bismark.5x.cov",
+    output:
+        "../4_deduplicated/CpG/5x/{sample}_bismark_bt2_pe.deduplicated.bismark.5x.bw",
+    params:
+        bedG="../4_deduplicated/CpG/5x/{sample}_bismark_bt2_pe.deduplicated.bismark.5x.bedGraph",
+        bedGSorted="../4_deduplicated/CpG/5x/{sample}_bismark_bt2_pe.deduplicated.bismark.5x.sorted.bedGraph",
+    shell:
+        """
+            ml GCC/5.4.0-2.26  OpenMPI/1.10.3
+            ml  ucsc-tools/3.4.3
+
+            ## make bedGraph from 5x coverage file
+            cut -f1,2,3,4 {input} > {params.bedG}
+
+            echo 'Sort bedGraph'
+            sort -k1,1 -k2,2n {params.bedG} >  {params.bedGSorted}
+
+            bedGraphToBigWig {params.bedGSorted} /projects/fs1/common/genome/lunarc/genomes/human/hg38/hg38_chrom_sizes.txt {output}
+
+        """

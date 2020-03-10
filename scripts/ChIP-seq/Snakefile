@@ -1,0 +1,297 @@
+
+configfile: "config.yaml"
+
+# snakemake -j 5 --cluster-config lunarc_config.json --cluster "sbatch -A {cluster.account} -p {cluster.partition} -n {cluster.n}  -t {cluster.time} -o {cluster.o} -e {cluster.e} -J {cluster.J} -N {cluster.N}"
+
+rule all:
+    input:
+        expand("../2_bowtie2/filtered/{sample}.bt2.sens-loc.MAPQ10.bw",sample=config["samples"]),
+        "../2_bowtie2/ucsc.tracks.unique.all.txt"
+
+rule run_fastqc:
+    input:
+        "../1_fastq/{sample}.R1.fastq.gz"
+    output:
+        "../1_fastq/{sample}.R1_fastqc.html"
+    shell:
+        """
+	    ml fastqc
+	    fastqc {input}
+        """
+
+rule run_bt2_sensloc:
+    input:
+        fastq="../1_fastq/{sample}.R1.fastq.gz"
+    output:
+        sam="../2_bowtie2/{sample}.R1.bt2.sens-loc.sam"
+    shell:
+        """
+        ml GCC/5.4.0-2.26  OpenMPI/1.10.3
+        ml Bowtie2/2.3.2
+
+        bowtie2 --sensitive-local -p 10 -x /projects/fs1/common/genome/lunarc/indicies/bowtie2/human/hg38/hg38 -U {input} -S {output.sam}
+        """
+
+rule sam_filtering:
+    input:
+        "../2_bowtie2/{sample}.R1.bt2.sens-loc.sam"
+    output:
+        sam="../2_bowtie2/filtered/{sample}.bt2.sens-loc.MAPQ10.sam",
+        statsU="../2_bowtie2/filtered/{sample}.bt2.sens-loc.MAPQ10.stats",
+        statsM="../2_bowtie2/{sample}.bt2.sens-loc.orig.stats"
+    shell:"""
+
+        ml GCC/5.4.0-2.26  OpenMPI/1.10.3
+        ml SAMtools/1.4
+
+        echo "> Filter MAPQ >10 to get unique reads:"
+        echo ">> samtools view -q 10 -h {input} > {output.sam}"
+        samtools view -q 10 -h {input} > {output.sam}
+
+        echo "> Stats unique reads:"
+        echo ">> samtools stats {output.sam} > {output.statsU}"
+        samtools stats {output.sam} > {output.statsU}
+
+        echo "> Stats all mapped reads:"
+        echo ">> samtools stats {input} > {output.statsM}"
+        samtools stats {input} > {output.statsM}
+
+        """
+
+rule samToBam:
+    input:
+        samU="../2_bowtie2/filtered/{sample}.bt2.sens-loc.MAPQ10.sam",
+        samOrig="../2_bowtie2/{sample}.R1.bt2.sens-loc.sam"
+    output:
+        bamM="../2_bowtie2/{sample}.bt2.sens-loc.orig.bam",
+        bamU="../2_bowtie2/filtered/{sample}.bt2.sens-loc.MAPQ10.bam"
+    shell: """
+        ml GCC/5.4.0-2.26  OpenMPI/1.10.3
+        ml SAMtools/1.4
+
+        echo "> Convert to bam"
+        echo "> samtools view -Sb {input.samOrig} > {output.bamM}"
+        samtools view -Sb {input.samOrig} > {output.bamM}
+        echo "> samtools view -Sb {input.samU} > {output.bamU}"
+        samtools view -Sb {input.samU} > {output.bamU}
+    """
+
+rule BamToBw:
+    input:
+        "../2_bowtie2/filtered/{sample}.bt2.sens-loc.MAPQ10.bam"
+    output:
+        "../2_bowtie2/filtered/{sample}.bt2.sens-loc.MAPQ10.bw"
+    shell:"""
+
+        ml GCC/5.4.0-2.26  OpenMPI/1.10.3
+        ml SAMtools/1.4
+        ml foss/2016b
+        ml Python/3.5.2
+
+        basename=$(basename {input} .bam)
+        dirname=$(dirname {input})
+        sorted="$dirname/$basename.sorted.bam"
+
+        samtools sort -o $sorted {input}
+        samtools index -b $sorted
+        bamCoverage -b $sorted -o {output}
+
+    """
+
+rule ucsc_samplewise:
+    input:
+        "../2_bowtie2/filtered/{sample}.bt2.sens-loc.MAPQ10.bw"
+    output:
+        "../2_bowtie2/ucsc.tracks.unique.{sample}.txt"
+    shell:"""
+        ml ncftp
+        ncftpput -u med-pvb -p [passwrd] bone.bmc.lu.se Public {input}
+        basename=$(basename {input})
+        echo "track type=bigWig name={wildcards.sample}_unique visibility=full smoothingWindow=4 autoScale=on description={wildcards.sample}_unique bigDataUrl=http://bone.bmc.lu.se/Public/$basename color=0,0,255" > {output}
+    """
+
+rule ucsc_all:
+    input:
+        expand("../2_bowtie2/ucsc.tracks.unique.{sample}.txt",sample=config["samples"])
+    output:
+        "../2_bowtie2/ucsc.tracks.unique.all.txt"
+    shell:
+        """
+        cat {input} > {output}
+
+        rm {input}
+        """
+
+
+############ DEEPTOOLS #####################
+######### Quality control #############
+
+# Make summary file
+rule multiBigwigSummary_all:
+    input:
+        expand("../2_bowtie2/filtered/{sample}.bt2.sens-loc.MAPQ10.bw",sample=config["sample_ids"]),
+    output:
+        "../3_qc/bt2.sens-loc.MAP10_multiBigWigSummary.npz"
+    shell:"""
+
+    ml GCC/5.4.0-2.26  OpenMPI/1.10.3
+    ml foss/2016b
+    ml Python/3.5.2
+
+    multiBigwigSummary bins --bwfiles multiBigwigSummary bins --bwfiles {input} -o {output}
+
+    """
+
+# Plot PCA of data
+rule plotPCA_qc:
+    input:
+        files="../3_qc/bt2.sens-loc.MAP10_multiBigWigSummary.npz"
+    params:
+        samples=expand("{sample}",sample=config["sample_names"])
+    output:
+        name="../3_qc/bt2.sens-loc.MAP10_multiBigWigSummary.PCA.pdf"
+    shell:"""
+    ml GCC/5.4.0-2.26  OpenMPI/1.10.3
+    ml foss/2016b
+    ml Python/3.5.2
+    plotPCA -in {input.files} -o {output.name} --labels {params.samples} --plotFileFormat pdf
+    """
+
+# Correlation plots
+rule plotCorrelation_qc:
+    input:
+        file="../3_qc/bt2.sens-loc.MAP10_multiBigWigSummary.npz"
+    params:
+        samples=expand("{sample}",sample=config["sample_names"])
+    output:
+        spear="../3_qc/bt2.sens-loc.MAP10_multiBigWigSummary.Corr.Spearman.pdf",
+        pear="../3_qc/bt2.sens-loc.MAP10_multiBigWigSummary.Corr.Pearson.pdf"
+    shell:"""
+    ml GCC/5.4.0-2.26  OpenMPI/1.10.3
+    ml foss/2016b
+    ml Python/3.5.2
+    plotCorrelation -in {input.file} -c spearman -p heatmap -o {output.spear} --labels {params.samples}  --plotFileFormat pdf
+    plotCorrelation -in {input.file} -c pearson -p heatmap -o {output.pear} --labels {params.samples}  --plotFileFormat pdf
+
+    """
+# Fingerprint plot
+rule plotFingerprint_conds_qc:
+    input:
+        h3k27ac=expand("../2_bowtie2/filtered/{sample}.bt2.sens-loc.MAPQ10.sorted.bam",sample=config["H3K27AC"]),
+        pol2=expand("../2_bowtie2/filtered/{sample}.bt2.sens-loc.MAPQ10.sorted.bam",sample=config["PolII"]),
+        h3k27me3=expand("../2_bowtie2/filtered/{sample}.bt2.sens-loc.MAPQ10.sorted.bam",sample=config["H3K27me3"]),
+        inp=expand("../2_bowtie2/filtered/{sample}.bt2.sens-loc.MAPQ10.sorted.bam",sample=config["Input"]),
+    params:
+        h3k27ac=expand("{sample}",sample=config["sample_names_H3K27Ac"]),
+        pol2=expand("{sample}",sample=config["sample_names_PolII"]),
+        h3k27me3=expand("{sample}",sample=config["sample_names_H3K27me3"]),
+        inp=expand("{sample}",sample=config["sample_names_IN"])
+
+    output:
+        name="../3_qc/{treat}_bt2.sens-loc.MAP10_multiBigWigSummary.Fingerprint.pdf"
+
+    shell:"""
+    ml GCC/5.4.0-2.26  OpenMPI/1.10.3
+    ml foss/2016b
+    ml Python/3.5.2
+    plotFingerprint -b {input.h3k27ac} -plot {output.name} --labels {params.h3k27ac}  --plotFileFormat pdf
+    plotFingerprint -b {input.pol2} -plot {output.name} --labels {params.pol2}  --plotFileFormat pdf
+    plotFingerprint -b {input.h3k27me3} -plot {output.name} --labels {params.h3k27me3} --plotFileFormat pdf
+    plotFingerprint -b {input.inp} -plot {output.name} --labels {params.inp} --plotFileFormat pdf
+    """
+
+# Print all fingerprints
+rule plotFingerprint_all_qc:
+    input:
+        all=expand("../2_bowtie2/filtered/{sample}.bt2.sens-loc.MAPQ10.sorted.bam",sample=config["sample_ids"]),
+    params:
+        all=expand("{sample}",sample=config["sample_ids"])
+    output:
+        all="../3_qc/all_bt2.sens-loc.MAP10_multiBigWigSummary.Fingerprint.pdf"
+    shell:"""
+    ml GCC/5.4.0-2.26  OpenMPI/1.10.3
+    ml foss/2016b
+    ml Python/3.5.2
+    plotFingerprint -b {input.all} -plot {output.all} --labels {params.all} --plotFileFormat pdf
+
+    """
+
+## Get mean of two ChIP-replicates
+rule bamCompare_meanKOWT_K27ac:
+    input:
+        k27ac_ko1="../2_bowtie2/filtered/1_chip.bt2.sens-loc.MAPQ10.sorted.bam",
+        k27ac_ko2="../2_bowtie2/filtered/2_chip.bt2.sens-loc.MAPQ10.sorted.bam",
+        k27ac_wt1="../2_bowtie2/filtered/3_chip.bt2.sens-loc.MAPQ10.sorted.bam",
+        k27ac_wt2="../2_bowtie2/filtered/4_chip.bt2.sens-loc.MAPQ10.sorted.bam",
+        k27m3_ko1="../2_bowtie2/filtered/9_chip.bt2.sens-loc.MAPQ10.sorted.bam",
+        k27m3_ko2="../2_bowtie2/filtered/10_chip.bt2.sens-loc.MAPQ10.sorted.bam",
+        k27m3_wt1="../2_bowtie2/filtered/11_chip.bt2.sens-loc.MAPQ10.sorted.bam",
+        k27m3_wt2="../2_bowtie2/filtered/12_chip.bt2.sens-loc.MAPQ10.sorted.bam",
+        pol_ko1="../2_bowtie2/filtered/5_chip.bt2.sens-loc.MAPQ10.sorted.bam",
+        pol_ko2="../2_bowtie2/filtered/6_chip.bt2.sens-loc.MAPQ10.sorted.bam",
+        pol_wt1="../2_bowtie2/filtered/7_chip.bt2.sens-loc.MAPQ10.sorted.bam",
+        pol_wt2="../2_bowtie2/filtered/8_chip.bt2.sens-loc.MAPQ10.sorted.bam"
+    output:
+        k27ac_mKo="../5_meanBw/chip_k27ac_KO_1.2.mean.bw",
+        k27ac_mWt="../5_meanBw/chip_k27ac_WT_3.4.mean.bw",
+        k27m3_mKo="../5_meanBw/chip_k27m3_KO_9.10.mean.bw",
+        k27m3_mWt="../5_meanBw/chip_k27m3_WT_11.12.mean.bw",
+        pol_mKo="../5_meanBw/chip_pol_KO_5.6.mean.bw",
+        pol_mWt="../5_meanBw/chip_pol_WT_7.8.mean.bw",
+    threads: 8
+    shell:"""
+        ml GCC/5.4.0-2.26  OpenMPI/1.10.3
+        ml foss/2016b
+        ml Python/3.5.2
+
+        # mean K27ac
+        bamCompare -b1 {input.k27ac_ko1} -b2 {input.k27ac_ko2} -o {output.k27ac_mKo} -of bigwig --sampleLength 2000 --scaleFactorsMethod SES --ratio mean -p 8
+        bamCompare -b1 {input.k27ac_wt1} -b2 {input.k27ac_wt2} -o {output.k27ac_mWt} -of bigwig --sampleLength 2000 --scaleFactorsMethod SES --ratio mean -p 8
+
+        bamCompare -b1 {input.k27m3_ko1} -b2 {input.k27m3_ko2} -o {output.k27m3_mKo} -of bigwig --sampleLength 2000 --scaleFactorsMethod SES --ratio mean -p 8
+        bamCompare -b1 {input.k27m3_wt1} -b2 {input.k27m3_wt2} -o {output.k27m3_mWt} -of bigwig --sampleLength 2000 --scaleFactorsMethod SES --ratio mean -p 8
+
+        bamCompare -b1 {input.pol_ko1} -b2 {input.pol_ko2} -o {output.pol_mKo} -of bigwig --sampleLength 2000 --scaleFactorsMethod SES --ratio mean -p 8
+        bamCompare -b1 {input.pol_wt1} -b2 {input.pol_wt2} -o {output.pol_mWt} -of bigwig --sampleLength 2000 --scaleFactorsMethod SES --ratio mean -p 8
+
+
+    """
+
+############ plotheatmap ##################
+# Plots deeptools heatmaps of given samples and features
+# Compute matrix
+rule computeMatrix_L1hspa234_WGBS_k27ac_polII_k27m_means:
+    input:
+        k27ac_mKo="../5_meanBw/chip_k27ac_KO_1.2.mean.bw",
+        k27ac_mWt="../5_meanBw/chip_k27ac_WT_3.4.mean.bw",
+        k27m3_mKo="../5_meanBw/chip_k27m3_KO_9.10.mean.bw",
+        k27m3_mWt="../5_meanBw/chip_k27m3_WT_11.12.mean.bw",
+        pol_mKo="../5_meanBw/chip_pol_KO_5.6.mean.bw",
+        pol_mWt="../5_meanBw/chip_pol_WT_7.8.mean.bw",
+        BS_WT="../5_meanBw/WT_bismark_bt2_pe.deduplicated.bismark.bw",
+        BS_KO="../5_meanBw/DNMT1_KO_bismark_bt2_pe.deduplicated.bismark.bw",
+        L1bed=expand("../features/{l1fam}.FL6000.bed",l1fam=['L1HS','L1PA2','L1PA3','L1PA4'])
+    output:
+        "../6_deeptools/L1hspa234_FL6000_WGBS_H3K27ac_pol2_k27m.means.mat"
+    threads: 8
+    shell:"""
+    ml GCC/5.4.0-2.26  OpenMPI/1.10.3
+    ml foss/2016b
+    ml Python/3.5.2
+    computeMatrix reference-point -S {input.BS_WT} {input.BS_KO} {input.k27ac_mWt} {input.k27ac_mKo} {input.pol_mWt} {input.pol_mKo} {input.k27m3_mWt} {input.k27m3_mKo}  -R {input.L1bed} -a 5000 -b 5000 --regionBodyLength 3000 -out {output} -p 8
+
+    """
+# produce the plot
+rule plotHeatmap_L1hspa234_WGBS_k27ac_polII_k27m_means:
+    input:
+        "../6_deeptools/L1hspa234_FL6000_WGBS_H3K27ac_pol2_k27m.means.mat"
+    output:
+        "../6_deeptools/L1hspa234_FL6000_WGBS_H3K27ac_pol2_k27m.means.png"
+    shell:
+        """
+        ml GCC/5.4.0-2.26  OpenMPI/1.10.3
+        ml foss/2016b
+        ml Python/3.5.2
+
+        plotHeatmap -m {input} -o {output} --sortUsingSamples 4 --yMin 0 --zMin 0 --yMax 50 50 10 10 10 1.4 10 10 --zMax 50 50 10 10 10 1 10 10 --colorMap Greys Greys Reds Reds Greens Greens Blues Blues --regionsLabel "L1HS" "L1PA2" "L1PA3" "L1PA4" --samplesLabel "WGBS WT" "WGBS DNMT1KO" "H3K27ac WT" "H3K27ac KO" "Pol II WT" "Pol II KO" "H3K27m3 WT" "H3K27m3 KO"
+        """
